@@ -124,4 +124,5 @@ app.add_handler(CommandHandler("structure", structure))
 app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-app.run_polling()
+import asyncio
+asyncio.run(app.run_polling())
