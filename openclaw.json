@@ -1,4 +1,12 @@
 {
+  "gateway": {
+    "mode": "local"
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "/workspace"
+    }
+  },
   "models": {
     "default": "deepseek/deepseek-chat",
     "providers": {
@@ -16,22 +24,7 @@
       "dmPolicy": "allowlist",
       "allowFrom": ["tg:8166805746"],
       "streaming": "partial",
-      "historyLimit": 50,
-      "customCommands": [
-        { "command": "structure", "description": "📁 عرض هيكل المشروع" },
-        { "command": "memory",    "description": "🧠 قراءة/كتابة الذاكرة" },
-        { "command": "review",    "description": "🔍 مراجعة كود" },
-        { "command": "edit",      "description": "✏️ تعديل ملف" },
-        { "command": "status",    "description": "📊 حالة البوت" }
-      ]
-    }
-  },
-  "agents": {
-    "defaults": {
-      "workspace": "/root/.openclaw/workspace",
-      "model": "deepseek/deepseek-chat",
-      "maxTokens": 4000,
-      "temperature": 0.3
+      "historyLimit": 50
     }
   },
   "scheduler": {
