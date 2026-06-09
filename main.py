@@ -2,82 +2,70 @@
 """
 OpenClaw-inspired Telegram Bot for SetRise3 Repository Management
 Production-grade AI Agent using DeepSeek
+Compatible with Python 3.13+ (uses httpx + getUpdates)
 """
 
 import os
+import sys
+import json
+import time
 import logging
+import asyncio
 import re
 from typing import Dict, Optional
 from datetime import datetime
 
 import httpx
 from github import Github, GithubException
-from github.Repository import Repository
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-    CallbackQueryHandler,
-)
-from telegram.constants import ParseMode
 
 # -------------------- Configuration --------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("setrize-bot")
 
-# Environment variables (set these in Railway)
+# Environment variables (set in Railway)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 DEEPSEEK_API_KEY = os.environ["DEEPSEEK_API_KEY"]
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-GITHUB_REPO = "rkm2004europe/setrise3"   # <-- المستودع المستهدف
+GITHUB_REPO = "rkm2004europe/setrise3"   # target repository
 
-# Allowed users: add your Telegram user ID here for exclusive access
-ALLOWED_USERS = []  # e.g. [123456789]
-
-# DeepSeek settings
 DEEPSEEK_MODEL = "deepseek-chat"
 MAX_TOKENS = 4000
 TEMPERATURE = 0.3
 
 # GitHub client
 g = Github(GITHUB_TOKEN)
-repo: Repository = g.get_repo(GITHUB_REPO)
+repo = g.get_repo(GITHUB_REPO)
 
 # In-memory session storage per user
 user_sessions: Dict[int, list] = {}
-
-# Memory file in the target repository
 MEMORY_FILE = "MEMORY.md"
 
 # -------------------- System Prompt --------------------
-SYSTEM_PROMPT = """أنت مساعد متطور لإدارة مشروع SetRize3 - تطبيق Flutter كامل.
-أنت جزء من نظام OpenClaw-like Agent Runtime. قدراتك:
-- تحليل الكود وتحديد موقعه الصحيح
-- تعديل الملفات بناءً على وصف
-- اقتراح تحسينات معمارية
-- إنشاء Pull Requests احترافية
-- الإجابة عن أسئلة حول المشروع
-- حفظ واسترجاع تفضيلات المستخدم (ذاكرة)
+SYSTEM_PROMPT = """You are an advanced AI assistant managing the SetRize3 project – a Flutter application using Clean Architecture.
+You are part of an OpenClaw-like Agent Runtime. Your capabilities:
+- Analyze code and determine its correct location in the project
+- Modify files based on a description
+- Suggest architectural improvements
+- Create professional Pull Requests
+- Answer questions about the project
+- Store and retrieve user preferences and notes (memory)
 
-هيكل المشروع SetRize3:
+Project structure (SetRize3):
 lib/
 ├── main.dart
-├── core/          # Core functionality (theme, routes, di)
+├── core/          # Core functionality (theme, routes, DI)
 ├── features/      # Feature modules
 │   ├── auth/      # Authentication
 │   ├── home/      # Home screen
 │   ├── settings/  # Settings
 │   └── ...
-├── shared/        # Shared widgets, utils
+├── shared/        # Shared widgets, utilities
 └── l10n/          # Localization
 
-عند إضافة ملف Dart جديد، اتبع Clean Architecture بدقة:
+When adding a new Dart file, strictly follow Clean Architecture:
 - data/datasources/
 - data/repositories/
 - domain/entities/
@@ -87,16 +75,15 @@ lib/
 - presentation/screens/
 - presentation/widgets/
 
-أجب بالعربية الفصحى المختصرة والمباشرة. كن دقيقاً ومهنياً."""
+Always respond in concise, professional English. Provide accurate and helpful guidance."""
 
 # -------------------- Helper Functions --------------------
 async def deepseek_chat(messages: list, user_id: Optional[int] = None) -> str:
     """Send chat request to DeepSeek with session context."""
     try:
-        # Build full context
         full_messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         if user_id and user_id in user_sessions:
-            full_messages.extend(user_sessions[user_id][-10:])  # recent 10 msgs
+            full_messages.extend(user_sessions[user_id][-10:])  # last 10 messages
         full_messages.extend(messages)
 
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -117,11 +104,40 @@ async def deepseek_chat(messages: list, user_id: Optional[int] = None) -> str:
             data = response.json()
             return data["choices"][0]["message"]["content"]
     except Exception as e:
-        logger.error(f"DeepSeek error: {e}")
-        return f"❌ خطأ في الاتصال بـ DeepSeek: {str(e)}"
+        logger.error(f"DeepSeek API error: {e}")
+        return f"❌ Error contacting DeepSeek: {str(e)}"
+
+async def telegram_api(method: str, payload: dict) -> dict:
+    """Make a generic Telegram Bot API call."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        r = await client.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/{method}",
+            json=payload,
+        )
+        return r.json()
+
+async def send_message(chat_id: int, text: str, parse_mode: str = "Markdown"):
+    """Send a message to a chat."""
+    return await telegram_api("sendMessage", {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode,
+    })
+
+async def download_file(file_id: str) -> bytes:
+    """Download a file from Telegram."""
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getFile?file_id={file_id}"
+        )
+        path = r.json()["result"]["file_path"]
+        r2 = await client.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{path}"
+        )
+        return r2.content
 
 def get_file_from_github(file_path: str) -> Optional[str]:
-    """Read file content from the repository."""
+    """Read a file's content from the GitHub repository."""
     try:
         content = repo.get_contents(file_path)
         return content.decoded_content.decode("utf-8")
@@ -129,50 +145,31 @@ def get_file_from_github(file_path: str) -> Optional[str]:
         return None
 
 def create_github_file(file_path: str, content: str, commit_msg: str) -> str:
-    """Create new file on GitHub."""
+    """Create a new file on GitHub."""
     try:
         existing = repo.get_contents(file_path)
-        return f"⚠️ الملف `{file_path}` موجود. استخدم /edit لتعديله."
+        return f"⚠️ File `{file_path}` already exists. Use /edit to modify it."
     except:
         repo.create_file(file_path, commit_msg, content)
-        return f"✅ تم إنشاء: `{file_path}`"
+        return f"✅ Created: `{file_path}`"
 
 def update_github_file(file_path: str, content: str, commit_msg: str) -> str:
-    """Update existing file."""
+    """Update an existing file on GitHub."""
     try:
         existing = repo.get_contents(file_path)
         repo.update_file(file_path, commit_msg, content, existing.sha)
-        return f"✅ تم تحديث: `{file_path}`"
+        return f"✅ Updated: `{file_path}`"
     except GithubException as e:
         if e.status == 404:
             return create_github_file(file_path, content, commit_msg)
-        return f"❌ خطأ: {str(e)}"
-
-def create_pull_request(branch_name: str, file_path: str, content: str,
-                        commit_msg: str, pr_title: str, pr_body: str) -> str:
-    """Create a Pull Request."""
-    try:
-        base = repo.default_branch
-        sb = repo.get_branch(base)
-        repo.create_git_ref(f"refs/heads/{branch_name}", sb.commit.sha)
-
-        try:
-            existing = repo.get_contents(file_path, ref=branch_name)
-            repo.update_file(file_path, commit_msg, content, existing.sha, branch=branch_name)
-        except:
-            repo.create_file(file_path, commit_msg, content, branch=branch_name)
-
-        pr = repo.create_pull(title=pr_title, body=pr_body, head=branch_name, base=base)
-        return f"🎉 PR #{pr.number}: [{pr.title}]({pr.html_url})"
-    except Exception as e:
-        return f"❌ فشل PR: {str(e)}"
+        return f"❌ Error updating file: {str(e)}"
 
 def get_repo_structure(path: str = "lib", prefix: str = "") -> str:
-    """Get directory tree string."""
+    """Recursively retrieve the repository directory tree."""
     try:
-        items = repo.get_contents(path)
+        contents = repo.get_contents(path)
         result = []
-        for item in items:
+        for item in contents:
             if item.type == "dir":
                 result.append(f"{prefix}📁 {item.name}/")
                 result.append(get_repo_structure(item.path, prefix + "  "))
@@ -183,10 +180,12 @@ def get_repo_structure(path: str = "lib", prefix: str = "") -> str:
         return ""
 
 def read_memory() -> str:
+    """Read the MEMORY.md file from the repository."""
     content = get_file_from_github(MEMORY_FILE)
     return content if content else ""
 
 def write_memory(content: str) -> bool:
+    """Overwrite the MEMORY.md file."""
     try:
         update_github_file(MEMORY_FILE, content, "📝 Update memory")
         return True
@@ -194,182 +193,189 @@ def write_memory(content: str) -> bool:
         return False
 
 def add_to_memory(note: str) -> str:
+    """Append a timestamped note to MEMORY.md."""
     current = read_memory()
     timestamp = datetime.now().isoformat()
     new_entry = f"\n### {timestamp}\n{note}\n"
     updated = (current + new_entry) if current else f"# 🧠 SetRize3 Memory\n{new_entry}"
     if write_memory(updated):
-        return "✅ تم الحفظ في الذاكرة."
-    return "❌ فشل الحفظ."
+        return "✅ Note saved to memory."
+    return "❌ Failed to save to memory."
 
-# -------------------- Telegram Handlers --------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    keyboard = [
-        [InlineKeyboardButton("📁 هيكل المشروع", callback_data="structure")],
-        [InlineKeyboardButton("💬 مساعدة", callback_data="help")],
-        [InlineKeyboardButton("🧠 الذاكرة", callback_data="memory")],
-    ]
-    markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        f"🤖 *مرحباً {user.first_name}!*\n\n"
-        "أنا مساعد SetRize3 الذكي - إصدار OpenClaw.\n\n"
-        "📄 أرسل ملف `.dart` لإضافته في مكانه الصحيح.\n"
-        "💬 اطرح سؤالاً عن المشروع.\n"
-        "الأوامر: /review, /edit, /pr, /memory, /structure",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=markup,
-    )
+# -------------------- Update Processor --------------------
+async def process_update(update: dict):
+    """Process a single Telegram update (message, command, document)."""
+    message = update.get("message")
+    if not message:
+        return
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "structure":
-        structure = get_repo_structure()
-        text = f"📁 *الهيكل:*\n```\n{structure}\n```" if structure else "❌ تعذر قراءة الهيكل."
-        await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-    elif query.data == "help":
-        await query.message.reply_text(
-            "📚 *الأوامر:*\n"
-            "`/review <ملف|وصف>` - تحليل\n"
-            "`/edit <مسار> <وصف>` - تعديل\n"
-            "`/pr <عنوان> <وصف>` - إنشاء PR\n"
-            "`/memory <نص>` - حفظ ملاحظة\n"
-            "`/structure` - عرض الهيكل",
-            parse_mode=ParseMode.MARKDOWN,
+    chat_id = message.get("chat", {}).get("id")
+    text = message.get("text", "")
+    document = message.get("document")
+    user_id = message.get("from", {}).get("id")
+
+    # Handle /start
+    if text == "/start":
+        await send_message(chat_id,
+            "🤖 *Welcome! I'm the SetRize3 AI Assistant (OpenClaw-style).*\n\n"
+            "📄 Send a `.dart` file → I'll place it in the correct path.\n"
+            "💬 Ask any question about the project.\n"
+            "📁 `/structure` → Show project structure.\n"
+            "🧠 `/memory <note>` → Save a note to project memory.\n"
+            "🔍 `/review <file or description>` → Analyze code.\n"
+            "✏️ `/edit <path> <description>` → Edit a file.\n"
+            "🔀 `/pr` → Create a Pull Request (under development)."
         )
-    elif query.data == "memory":
-        mem = read_memory()
-        if mem:
-            await query.message.reply_text(f"🧠 *الذاكرة:*\n{mem[:3000]}", parse_mode=ParseMode.MARKDOWN)
-        else:
-            await query.message.reply_text("🧠 الذاكرة فارغة.")
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
-        return
-    document = update.message.document
-    if not document.file_name.endswith(".dart"):
-        await update.message.reply_text("⚠️ أرسل ملف `.dart` فقط.")
-        return
-    msg = await update.message.reply_text("⏳ تحليل الملف...")
-    try:
-        file = await document.get_file()
-        content = (await file.download_as_bytearray()).decode("utf-8")
-        ai_resp = await deepseek_chat([{
-            "role": "user",
-            "content": f"اسم الملف: {document.file_name}\n\n```dart\n{content[:2000]}\n```\n"
-                       f"حدد المسار الصحيح في المشروع. اكتب 'المسار:' ثم 'السبب:'."
-        }], user_id)
-        lines = ai_resp.split("\n")
-        file_path = reason = ""
-        for line in lines:
-            if line.startswith("المسار:"):
-                file_path = line.replace("المسار:", "").strip()
-            elif line.startswith("السبب:"):
-                reason = line.replace("السبب:", "").strip()
-        if not file_path:
-            await msg.edit_text("❌ لم أستطع تحديد المسار.")
+    # Handle /structure
+    elif text == "/structure":
+        await send_message(chat_id, "⏳ Reading project structure...")
+        structure = get_repo_structure()
+        if structure:
+            await send_message(chat_id, f"📁 *Project Structure:*\n```\n{structure}\n```")
+        else:
+            await send_message(chat_id, "❌ Could not read repository structure.")
+
+    # Handle /memory
+    elif text.startswith("/memory"):
+        note = text[len("/memory"):].strip()
+        if not note:
+            mem = read_memory()
+            if mem:
+                await send_message(chat_id, f"🧠 *Memory:*\n{mem[:3000]}")
+            else:
+                await send_message(chat_id, "🧠 Memory is empty. Add a note: `/memory <text>`")
+        else:
+            result = add_to_memory(note)
+            await send_message(chat_id, result)
+
+    # Handle /review
+    elif text.startswith("/review"):
+        target = text[len("/review"):].strip()
+        if not target:
+            await send_message(chat_id, "Usage: `/review <file_path or description>`")
             return
-        commit = f"feat: add {document.file_name} via bot"
-        result = create_github_file(file_path, content, commit)
-        await msg.edit_text(f"{result}\n📍 `{file_path}`\n💡 {reason}", parse_mode=ParseMode.MARKDOWN)
-        user_sessions.setdefault(user_id, []).append({"role": "assistant", "content": ai_resp})
-    except Exception as e:
-        await msg.edit_text(f"❌ خطأ: {e}")
+        await send_message(chat_id, "🔍 Analyzing...")
+        # If it looks like a file path, fetch its content
+        code = None
+        if "/" in target:
+            code = get_file_from_github(target)
+        prompt = f"Review this code:\n```dart\n{code[:3000]}\n```" if code else f"Review this aspect of SetRize3: {target}"
+        response = await deepseek_chat([{"role": "user", "content": prompt}], user_id)
+        await send_message(chat_id, response)
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
-        return
-    text = update.message.text
-    msg = await update.message.reply_text("⏳ معالجة...")
-    try:
-        memory_context = ""
+    # Handle /edit
+    elif text.startswith("/edit"):
+        parts = text[len("/edit"):].strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await send_message(chat_id, "Usage: `/edit <path> <description of change>`")
+            return
+        file_path, description = parts[0], parts[1]
+        current = get_file_from_github(file_path)
+        if not current:
+            await send_message(chat_id, f"❌ File `{file_path}` not found.")
+            return
+        await send_message(chat_id, "✏️ Editing file...")
+        prompt = f"Edit the file `{file_path}` as follows: {description}\n\nCurrent content:\n```dart\n{current[:3000]}\n```\nReturn the full modified code."
+        response = await deepseek_chat([{"role": "user", "content": prompt}], user_id)
+        # Extract code from response (simple heuristic)
+        code_match = re.search(r"```dart\n(.*?)```", response, re.DOTALL)
+        new_code = code_match.group(1) if code_match else response
+        result = update_github_file(file_path, new_code, f"✏️ Edit {file_path}: {description}")
+        await send_message(chat_id, f"{result}\n\n{response[:2000]}")
+
+    # Handle /pr (placeholder)
+    elif text.startswith("/pr"):
+        await send_message(chat_id, "🔀 Pull Request feature is coming soon. For now, use /edit and create a PR manually.")
+
+    # Handle document (.dart file)
+    elif document:
+        file_name = document.get("file_name", "")
+        if not file_name.endswith(".dart"):
+            await send_message(chat_id, "⚠️ Please send only `.dart` files.")
+            return
+        await send_message(chat_id, "⏳ Analyzing file and determining correct path...")
+        try:
+            file_bytes = await download_file(document["file_id"])
+            content = file_bytes.decode("utf-8")
+            # Ask DeepSeek for the correct path
+            ai_response = await deepseek_chat([{
+                "role": "user",
+                "content": f"File name: {file_name}\n\nContent:\n```dart\n{content[:2000]}\n```\nDetermine the correct path in the SetRize3 project following Clean Architecture. Reply with:\nPath: path/to/file.dart\nReason: brief explanation"
+            }], user_id)
+            # Parse path and reason
+            lines = ai_response.split("\n")
+            file_path = ""
+            reason = ""
+            for line in lines:
+                if line.startswith("Path:"):
+                    file_path = line.replace("Path:", "").strip()
+                elif line.startswith("Reason:"):
+                    reason = line.replace("Reason:", "").strip()
+            if not file_path:
+                await send_message(chat_id, "❌ Could not determine the file path.")
+                return
+            commit_msg = f"feat: add {file_name} via SetRize Bot"
+            result = create_github_file(file_path, content, commit_msg)
+            await send_message(chat_id, f"{result}\n📍 Path: `{file_path}`\n💡 {reason}")
+            # Update session
+            if user_id not in user_sessions:
+                user_sessions[user_id] = []
+            user_sessions[user_id].append({"role": "assistant", "content": ai_response})
+        except Exception as e:
+            logger.error(f"Document handling error: {e}")
+            await send_message(chat_id, f"❌ Error: {str(e)}")
+
+    # Handle plain text (question/chat)
+    elif text and not text.startswith("/"):
+        await send_message(chat_id, "⏳ Thinking...")
+        # Include memory snippet if available
+        memory_snippet = ""
         mem = read_memory()
         if mem:
-            memory_context = f"\n\nذاكرة المشروع:\n{mem[:1000]}"
-        resp = await deepseek_chat([{"role": "user", "content": f"{text}{memory_context}"}], user_id)
-        if len(resp) > 4000:
-            parts = [resp[i:i+4000] for i in range(0, len(resp), 4000)]
-            await msg.edit_text(parts[0], parse_mode=ParseMode.MARKDOWN)
-            for part in parts[1:]:
-                await update.message.reply_text(part, parse_mode=ParseMode.MARKDOWN)
+            memory_snippet = f"\n\nRecent project memory:\n{mem[:1000]}"
+        response = await deepseek_chat([{"role": "user", "content": f"{text}{memory_snippet}"}], user_id)
+        # Telegram has a 4096 char limit, split if necessary
+        if len(response) > 4000:
+            parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await send_message(chat_id, part)
+                else:
+                    await send_message(chat_id, part)
         else:
-            await msg.edit_text(resp, parse_mode=ParseMode.MARKDOWN)
-        user_sessions.setdefault(user_id, []).extend([
-            {"role": "user", "content": text},
-            {"role": "assistant", "content": resp}
-        ])
-    except Exception as e:
-        await msg.edit_text(f"❌ خطأ: {e}")
+            await send_message(chat_id, response)
+        # Update session
+        if user_id not in user_sessions:
+            user_sessions[user_id] = []
+        user_sessions[user_id].append({"role": "user", "content": text})
+        user_sessions[user_id].append({"role": "assistant", "content": response})
 
-async def review_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("استخدم: `/review <مسار_ملف_أو_وصف>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    target = " ".join(context.args)
-    msg = await update.message.reply_text("🔍 تحليل...")
-    code = get_file_from_github(target) if "/" in target else None
-    prompt = f"حلل هذا الملف:\n```dart\n{code[:3000]}\n```" if code else f"راجع هذا: {target}"
-    resp = await deepseek_chat([{"role": "user", "content": prompt}], update.effective_user.id)
-    await msg.edit_text(resp, parse_mode=ParseMode.MARKDOWN)
-
-async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 2:
-        await update.message.reply_text("استخدم: `/edit <مسار> <وصف التعديل>`", parse_mode=ParseMode.MARKDOWN)
-        return
-    path = context.args[0]
-    desc = " ".join(context.args[1:])
-    current = get_file_from_github(path)
-    if not current:
-        await update.message.reply_text("❌ الملف غير موجود.")
-        return
-    msg = await update.message.reply_text("✏️ تعديل...")
-    prompt = f"عدل الملف `{path}`:\n```dart\n{current[:3000]}\n```\nالتعديل المطلوب: {desc}\nأعد الكود الكامل بعد التعديل."
-    resp = await deepseek_chat([{"role": "user", "content": prompt}], update.effective_user.id)
-    # Naive extraction of code block
-    code_match = re.search(r"```dart\n(.*?)```", resp, re.DOTALL)
-    new_code = code_match.group(1) if code_match else resp
-    result = update_github_file(path, new_code, f"✏️ edit {path}: {desc}")
-    await msg.edit_text(f"{result}\n\n{resp[:2000]}", parse_mode=ParseMode.MARKDOWN)
-
-async def pr_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ميزة Pull Request قيد التطوير النهائي. حالياً يمكنك استخدام /edit ثم رفع PR يدوياً.")
-
-async def memory_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        mem = read_memory()
-        await update.message.reply_text(f"🧠 الذاكرة:\n{mem[:3000]}" if mem else "فارغة.")
-        return
-    note = " ".join(context.args)
-    result = add_to_memory(note)
-    await update.message.reply_text(result)
-
-async def structure_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    structure = get_repo_structure()
-    await update.message.reply_text(f"📁 الهيكل:\n```\n{structure}\n```" if structure else "❌ خطأ.")
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Update {update} caused error {context.error}")
-
-# -------------------- Main --------------------
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("review", review_cmd))
-    app.add_handler(CommandHandler("edit", edit_cmd))
-    app.add_handler(CommandHandler("pr", pr_cmd))
-    app.add_handler(CommandHandler("memory", memory_cmd))
-    app.add_handler(CommandHandler("structure", structure_cmd))
-    app.add_handler(MessageHandler(filters.Document.FileExtension("dart"), handle_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_error_handler(error_handler)
-
-    logger.info("🤖 SetRize Bot (OpenClaw) starting...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+# -------------------- Main Polling Loop --------------------
+async def main():
+    logger.info("🤖 SetRize Bot (OpenClaw style) starting...")
+    offset = 0
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                # Long-polling: wait up to 30 seconds for new updates
+                r = await client.get(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+                    params={"offset": offset, "timeout": 30},
+                    timeout=35,
+                )
+                data = r.json()
+                if not data.get("ok"):
+                    logger.error(f"Telegram API error: {data}")
+                    await asyncio.sleep(5)
+                    continue
+                updates = data.get("result", [])
+                for update in updates:
+                    offset = update["update_id"] + 1
+                    asyncio.create_task(process_update(update))
+            except Exception as e:
+                logger.error(f"Polling error: {e}")
+                await asyncio.sleep(3)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
