@@ -1,7 +1,4 @@
 {
-  "gateway": {
-    "mode": "local"
-  },
   "models": {
     "default": "deepseek/deepseek-chat",
     "providers": {
@@ -22,10 +19,10 @@
       "historyLimit": 50,
       "customCommands": [
         { "command": "structure", "description": "📁 عرض هيكل المشروع" },
-        { "command": "memory", "description": "🧠 قراءة/كتابة الذاكرة" },
-        { "command": "review", "description": "🔍 مراجعة كود" },
-        { "command": "edit", "description": "✏️ تعديل ملف" },
-        { "command": "status", "description": "📊 حالة البوت" }
+        { "command": "memory",    "description": "🧠 قراءة/كتابة الذاكرة" },
+        { "command": "review",    "description": "🔍 مراجعة كود" },
+        { "command": "edit",      "description": "✏️ تعديل ملف" },
+        { "command": "status",    "description": "📊 حالة البوت" }
       ]
     }
   },

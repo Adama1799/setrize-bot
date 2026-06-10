@@ -1,10 +1,8 @@
 FROM node:24-slim
 
-ENV OPENCLAW_CONFIG_PATH=/root/.openclaw/openclaw.json
 WORKDIR /app
 
-RUN npm install -g openclaw@latest \
-    && mkdir -p /root/.openclaw/workspace
+RUN npm install -g openclaw@latest
 
 COPY workspace/ /root/.openclaw/workspace/
 COPY openclaw.json /root/.openclaw/openclaw.json
